@@ -420,9 +420,12 @@ const plugin = Plugin.define({
           const type: string = event?.type ?? ""
           if (type === "session.created") {
             await sessionStartHook({ directory }, appLog)
-          } else if (type === "session.idle") {
+          } else if (type === "session.idle" || type === "session.execution.succeeded") {
+            // v1 fired checkpoints on session.idle; v2.0.24 does not emit
+            // session.idle on the public event stream — the execution
+            // lifecycle events carry the same sessionID and fire per turn.
             await sessionEventsHook({ directory }, "idle", eventSessionID(event))
-          } else if (type === "session.execution.failed") {
+          } else if (type === "session.error" || type === "session.execution.failed") {
             await sessionEventsHook({ directory }, "error", eventSessionID(event))
           }
         }

@@ -252,8 +252,11 @@ describe("plugin registration", () => {
   it("writes a flowdeck.log entry on session.idle events", async () => {
     await state.flushEvents()
     // Post-setup events won't be consumed (the stream already closed), so
-    // load a fresh plugin seeded with the event.
-    const idleState = await loadV2Plugin([{ type: "session.idle", data: { sessionID: "sess-idle" } }])
+    // load a fresh plugin seeded with the event. v2.0.24 does not emit
+    // session.idle, so the v1 idle path is driven by session.execution.succeeded.
+    const idleState = await loadV2Plugin([
+      { type: "session.execution.succeeded", data: { sessionID: "sess-idle" } },
+    ])
     await idleState.flushEvents()
     const logPath = join(idleState.directory, ".opencode", "flowdeck.log")
     expect(existsSync(logPath)).toBe(true)
@@ -276,14 +279,14 @@ describe("plugin registration", () => {
     rmSync(failedState.directory, { recursive: true, force: true })
   })
 
-  it("session.idle clears the per-session write counter", async () => {
+  it("session.execution.succeeded clears the per-session write counter", async () => {
     const { recordWrite, getWriteCount, clearWriteCounter } = await import("@/hooks/tool-guard")
     const sessionID = "sess-clear"
     recordWrite(sessionID, "/tmp/a.ts")
     recordWrite(sessionID, "/tmp/b.ts")
     expect(getWriteCount(sessionID)).toBe(2)
 
-    const idleState = await loadV2Plugin([{ type: "session.idle", data: { sessionID } }])
+    const idleState = await loadV2Plugin([{ type: "session.execution.succeeded", data: { sessionID } }])
     await idleState.flushEvents()
     expect(getWriteCount(sessionID)).toBe(0)
     clearWriteCounter(sessionID)
