@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-25
+
+### Changed
+- **BREAKING: plugin ported to the OpenCode v2 plugin API (v1 hosts affected).** The plugin ships dual v1+v2 exports — v2 hosts use the `Plugin.define` setup export, v1 hosts (≥1.18.29) use the object `server()` entrypoint. Older v1 releases (<1.18.29) are no longer supported from this single package.
+- **BREAKING: agent registration is now plugin-wins.** User overrides of FlowDeck-managed agents (orchestrator, planner, etc.) in `opencode.json` are overwritten on setup; v1 merged user overrides first. Re-apply custom agent overrides after upgrading.
+- Installer registers the plugin under both config keys — the legacy `plugin` (v1 hosts) and `plugins` (v2 hosts) — so one installer serves both host versions.
+
+### Fixed
+- v2 tool results no longer emit the unsupported `title` field
+- Agent temperature is only written when defined
+
 ## [0.7.0] - 2026-08-19
 
 ### Added
@@ -277,6 +288,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Delegation budget service and context ingress service.
 
+[0.8.0]: https://github.com/DVNghiem/flowdeck/compare/0.7.0...0.8.0
 [0.7.0]: https://github.com/DVNghiem/flowdeck/compare/0.6.1...0.7.0
 [0.6.1]: https://github.com/DVNghiem/flowdeck/compare/0.6.0...0.6.1
 [0.6.0]: https://github.com/DVNghiem/flowdeck/compare/0.4.12...0.6.0
