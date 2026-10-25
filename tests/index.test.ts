@@ -50,6 +50,26 @@ describe("plugin definition (v2)", () => {
     expect(PLUGIN_ID).toBe("flowdeck")
     expect(typeof plugin.setup).toBe("function")
   })
+it("exposes a v1 server() hook returning the v1 hooks object", async () => {
+    const mod = await import("@/index")
+    const plugin = mod.default
+    expect(typeof plugin.server).toBe("function")
+    const dir = makeTempDir()
+    try {
+      const hooks = await plugin.server({
+        directory: dir,
+        client: { app: { log: async () => undefined } },
+      })
+      expect(hooks).toMatchObject({ name: "@dv.nghiem/flowdeck", agent: {} })
+      expect(hooks.tool).toBe(FLOWDECK_TOOLS)
+      expect(typeof hooks.config).toBe("function")
+      expect(typeof hooks["tool.execute.before"]).toBe("function")
+      expect(typeof hooks["tool.execute.after"]).toBe("function")
+      expect(typeof hooks.event).toBe("function")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("plugin registration", () => {
@@ -349,7 +369,8 @@ describe("pure mapping helpers", () => {
       metadata: { files: 1 },
       attachments: [{ type: "file", mime: "text/plain", url: "file:///tmp/a.txt", filename: "a.txt" }],
     })
-    expect(result.title).toBe("Diff")
+    // `title` is not part of the v2 `Tool.Result` shape — it must be dropped.
+    expect(result).not.toHaveProperty("title")
     expect(result.metadata).toEqual({ files: 1 })
     expect(result.content[0]).toEqual({ type: "text", text: "-1 +2" })
     expect(result.content[1]).toEqual({
@@ -419,8 +440,11 @@ describe("pure mapping helpers", () => {
   })
 
   it("agentEdits defaults mode to subagent", () => {
-    expect(agentEdits({}).mode).toBe("subagent")
-    expect(agentEdits({}).model).toBeUndefined()
+    const edits = agentEdits({})
+    expect(edits.mode).toBe("subagent")
+    expect(edits.model).toBeUndefined()
+    // No configured temperature → none is written (guards the v2 agent transform).
+    expect(edits.request.body).toEqual({})
   })
 
   it("toolInputSchema produces an object JSON Schema from zod args", () => {

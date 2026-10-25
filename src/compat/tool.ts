@@ -30,6 +30,7 @@ export type ToolContext = {
   messageID: string
   agent: string
   metadata(input: { title?: string; metadata?: { [key: string]: any } }): void
+  /** Stub: silently auto-approves every permission prompt; no FlowDeck tool currently calls it. */
   ask(input: {
     permission: string
     patterns: string[]

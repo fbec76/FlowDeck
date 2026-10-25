@@ -1,9 +1,15 @@
 /**
- * FlowDeck — OpenCode v2 plugin entrypoint.
+ * FlowDeck — OpenCode plugin entrypoint (dual v1 + v2 export).
  *
- * Ported from the OpenCode v1 plugin API (`@opencode-ai/plugin` function
- * entrypoints returning hooks) to the v2 API (`Plugin.define` + `setup(ctx)`),
- * per https://opencode.ai/v2/docs/build/plugins/migrate-v1:
+ * The default export carries the v2 definition (`Plugin.define` +
+ * `setup(ctx)`) plus a v1 `server()` hook, per the migrate-v1 section
+ * "Support V1 and V2 from one package"
+ * (https://opencode.ai/v2/docs/build/plugins/migrate-v1): v1 hosts
+ * (>= 1.18.29) call `server()` on the default export object, while the v2
+ * loader validates `default` as `{ id, setup }` only and ignores `server`.
+ *
+ * The v2 port maps the v1 API (`@opencode-ai/plugin` function entrypoints
+ * returning hooks) as follows:
  *
  *   v1 `config` hook      → per-domain transforms (agent / mcp / command /
  *                           skill) + a `session.hook("context")` for rules
@@ -145,7 +151,6 @@ export function toolInputSchema(args: Parameters<typeof z.object>[0]) {
 /** V2 tool result content types (`Tool.TextContent` / `Tool.FileContent`). */
 export type V2FileContent = { type: "file"; uri: string; mime: string; name?: string }
 export type V2ToolResult = {
-  title?: string
   metadata?: Record<string, any>
   content: string | Array<{ type: "text"; text: string } | V2FileContent>
 }
@@ -163,7 +168,6 @@ export function toV2Result(result: ToolResult): V2ToolResult {
     content.push({ type: "file", uri: attachment.url, mime: attachment.mime, name: attachment.filename })
   }
   return {
-    ...(result.title === undefined ? {} : { title: result.title }),
     ...(result.metadata === undefined ? {} : { metadata: result.metadata }),
     content,
   }
@@ -303,7 +307,10 @@ const plugin = Plugin.define({
             // bridges the schema's phantom brand types.
             agent.model = edits.model as unknown as typeof agent.model
           }
-          agent.request.body.temperature = edits.request.body.temperature
+          // Only assign when configured — an unconditional write would clobber
+          // user-set values with explicit `undefined`.
+          const temperature = edits.request.body.temperature
+          if (temperature !== undefined) agent.request.body.temperature = temperature
           agent.mode = edits.mode
           agent.hidden = edits.hidden
         })
@@ -421,11 +428,11 @@ const plugin = Plugin.define({
           if (type === "session.created") {
             await sessionStartHook({ directory }, appLog)
           } else if (type === "session.idle" || type === "session.execution.succeeded") {
-            // v1 fired checkpoints on session.idle; v2.0.24 does not emit
-            // session.idle on the public event stream — the execution
-            // lifecycle events carry the same sessionID and fire per turn.
+            // opencode 2.1.4 defines session.idle in its event schema but never
+            // publishes it on the public event bus (verified live);
+            // session.execution.succeeded/failed are the effective idle/error signals.
             await sessionEventsHook({ directory }, "idle", eventSessionID(event))
-          } else if (type === "session.error" || type === "session.execution.failed") {
+          } else if (type === "session.execution.failed") {
             await sessionEventsHook({ directory }, "error", eventSessionID(event))
           }
         }
@@ -438,4 +445,153 @@ const plugin = Plugin.define({
   },
 })
 
-export default plugin
+/**
+ * V1 host contract, typed structurally (`@opencode-ai/plugin` was removed).
+ * Only `client.app.log` is used from the client.
+ */
+interface V1Client {
+  app: {
+    log(input: { body: { service: string; level: string; message: string } }): Promise<unknown>
+  }
+}
+
+/** v1 host entrypoint arguments. */
+interface V1PluginInput {
+  directory: string
+  client: V1Client
+}
+
+/** v1 `tool.execute.before`/`after` hook payload. */
+interface V1ToolHookInput {
+  tool: string
+  name?: string
+  sessionID?: string
+  args?: Record<string, unknown>
+  output?: unknown
+}
+
+/** v1 `event` hook payload. */
+interface V1EventPayload {
+  type?: string
+  properties?: { sessionID?: string }
+}
+
+/**
+ * V1 plugin body, restored for hosts that still consume the v1 hook API;
+ * reachable through `server()` on the default export.
+ */
+const v1Plugin = async ({ directory, client }: V1PluginInput): Promise<Record<string, unknown>> => {
+  const appLog = (msg: string): Promise<void> =>
+    client.app.log({ body: { service: "flowdeck", level: "info", message: msg } })
+      .then(() => undefined).catch(() => {})
+
+  let flowdeckConfig: FlowDeckConfig = loadFlowDeckConfig(directory)
+  const loopDetector = new LoopDetector(flowdeckConfig.governance?.loopDetection, appLog)
+
+  const { mcps } = buildFlowDeckMcpsWithMeta()
+
+  return {
+    name: "@dv.nghiem/flowdeck",
+    agent: {},
+    mcp: mcps,
+
+    config: async (cfg: Record<string, unknown>): Promise<void> => {
+      if (!(cfg as { default_agent?: string }).default_agent) {
+        (cfg as { default_agent?: string }).default_agent = "orchestrator"
+      }
+
+      flowdeckConfig = loadFlowDeckConfig(directory)
+      const resolvedAgents = getAgentConfigs(resolveAgentModels(flowdeckConfig))
+
+      // Per-agent shallow merge: plugin defaults first, user overrides win.
+      if (!cfg.agent) {
+        cfg.agent = { ...resolvedAgents }
+      } else {
+        const existing = cfg.agent as Record<string, unknown>
+        for (const [name, def] of Object.entries(resolvedAgents)) {
+          existing[name] = existing[name] ? { ...def, ...existing[name] } : { ...def }
+        }
+      }
+
+      const cfgMcp = cfg.mcp as Record<string, unknown> | undefined
+      if (cfgMcp) Object.assign(cfgMcp, mcps)
+      else cfg.mcp = { ...mcps }
+
+      const commands = loadCommands()
+      if (Object.keys(commands).length > 0) {
+        if (!cfg.command || typeof cfg.command !== "object") cfg.command = {}
+        const cfgCmd = cfg.command as Record<string, unknown>
+        for (const [name, cmd] of Object.entries(commands)) {
+          if (!cfgCmd[name]) cfgCmd[name] = cmd
+        }
+      }
+
+      const skillsDir = join(__dir, "..", "src", "skills")
+      if (existsSync(skillsDir)) {
+        const skills = (cfg.skills && typeof cfg.skills === "object" ? cfg.skills : { paths: [] }) as { paths?: string[] }
+        if (!skills.paths) skills.paths = []
+        if (!skills.paths.includes(skillsDir)) skills.paths.push(skillsDir)
+        cfg.skills = skills
+      }
+
+      const { paths: rulePaths, diagnostics } = lazyLoadRulePaths(directory)
+      appLog(diagnostics)
+      if (rulePaths.length > 0) {
+        if (!Array.isArray(cfg.instructions)) cfg.instructions = []
+        const seen = new Set(cfg.instructions as string[])
+        for (const p of rulePaths) if (!seen.has(p)) (cfg.instructions as string[]).push(p)
+      }
+    },
+
+    tool: FLOWDECK_TOOLS,
+
+    "tool.execute.before": async (input: V1ToolHookInput, output: { args?: Record<string, unknown> }): Promise<void> => {
+      // Tool guard (FLOWDECK_TOOL_GUARD_ENABLED=on) — blocks dangerous ops, enforces
+      // architectural constraints and per-agent write limits.
+      await toolGuardHook({ directory }, input, { args: output?.args ?? {} })
+      const loop = loopDetector.checkBefore(
+        input.tool ?? input.name ?? "unknown",
+        output?.args ?? input.args ?? {},
+        input.sessionID ?? "",
+      )
+      if (loop.action === "block") throw new Error(loop.escalationMessage)
+      if (loop.action === "warn") appLog(loop.message)
+    },
+
+    "tool.execute.after": async (input: V1ToolHookInput): Promise<void> => {
+      appLog(`[tool] done tool=${input.tool ?? input.name ?? "unknown"} session=${input.sessionID ?? ""}`)
+      // SDK's tool.execute.after only exposes toolInput (toolOutput is unavailable here).
+      // Pass a sentinel for output so call-count tracking still works; if the SDK
+      // includes output on toolInput, prefer it for hash-based loop detection.
+      loopDetector.recordAfter(
+        input.tool ?? input.name ?? "unknown",
+        input.args ?? {},
+        input.output ?? "[unavailable]",
+        input.sessionID ?? "",
+      )
+    },
+
+    event: async ({ event }: { event: V1EventPayload }): Promise<void> => {
+      const type: string = event?.type ?? ""
+      if (type === "session.created" || type === "session.started") {
+        await sessionStartHook({ directory }, appLog)
+      } else if (type === "session.idle" || type === "session.error") {
+        const sessionID = event?.properties?.sessionID ?? ""
+        await sessionEventsHook({ directory }, type === "session.idle" ? "idle" : "error", sessionID)
+      }
+    },
+  }
+}
+
+/**
+ * Dual v1 + v2 export ("Support V1 and V2 from one package",
+ * https://opencode.ai/v2/docs/build/plugins/migrate-v1). v1 hosts
+ * (>= 1.18.29) call `server()` on the default export object; the v2 loader
+ * validates `default` as `{ id, setup }` only, so `server` is inert there.
+ * The docs do not specify server()'s arguments — the host's input object is
+ * forwarded verbatim to the v1 plugin body.
+ */
+export default {
+  ...plugin,
+  server: v1Plugin,
+}
