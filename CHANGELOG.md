@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING: plugin ported to the OpenCode v2 plugin API (v1 hosts affected).** The plugin ships dual v1+v2 exports — v2 hosts use the `Plugin.define` setup export, v1 hosts (≥1.18.29) use the object `server()` entrypoint. Older v1 releases (<1.18.29) are no longer supported from this single package.
 - **BREAKING: agent registration is now plugin-wins.** User overrides of FlowDeck-managed agents (orchestrator, planner, etc.) in `opencode.json` are overwritten on setup; v1 merged user overrides first. Re-apply custom agent overrides after upgrading.
 - Installer registers the plugin under both config keys — the legacy `plugin` (v1 hosts) and `plugins` (v2 hosts) — so one installer serves both host versions.
+- **npm transition note:** until 0.8.0 is published to npm, the registry still serves the v1-only 0.7.0 build. OpenCode v2 users installing during this window must install from a local checkout (`./install.sh --local`) or a plugin bridge file — the npm package name fails to load on v2 with "Plugin must export a default definition with an id and an effect or setup function". The default npm-based install works once 0.8.0 is published.
 
 ### Fixed
 - v2 tool results no longer emit the unsupported `title` field
